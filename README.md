@@ -39,8 +39,10 @@ AI 驱动的大学期末复习工具：把不规范的 Word/PDF 题库文档一�
 
 ## 🛠 部署
 
-- **GitHub Pages（当前方案）**：已配置自动部署（`.github/workflows/deploy.yml`），**push 到 main 分支即自动构建发布**
-  - 首次启用只需一步：仓库 **Settings → Pages → Build and deployment → Source 选 "GitHub Actions"**，之后每次 push main 自动更新 <https://xiaobaiba999.github.io/final-exam-review/>
+- **GitHub Pages（已上线）**：<https://xiaobaiba999.github.io/final-exam-review/>
+  - 方式：本地/沙箱构建静态导出后推送到 `gh-pages` 分支，Pages 源 = `gh-pages / root`（已启用，含 `.nojekyll`）
+  - 更新流程：改代码 → `DEPLOY_TARGET=pages NEXT_PUBLIC_BASE_PATH=/final-exam-review bunx next build` → 把 `out/` 内容强推到 `gh-pages` 分支即可
+  - 自动部署（可选）：当前 Token 无 `workflow` 权限，Actions 工作流暂存于 `scripts/deploy-pages.yml.disabled`；将来给 Token 勾上 `workflow` 权限后，把它移回 `.github/workflows/deploy.yml` 并在 Pages 设置改选 "GitHub Actions"，即可恢复 push main 自动发布
 - **Vercel 兼容**：仓库保留了 `vercel.json`，同样可以直接导入 Vercel 部署（二选一即可）
 
 ## 💻 本地开发
