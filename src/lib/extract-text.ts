@@ -1,6 +1,6 @@
-// 文档文本提取：docx / pdf / 纯文本（仅服务端）
-import mammoth from 'mammoth'
-
+// 文档文本提取（浏览器版）：docx / pdf / 纯文本
+// docx 使用 mammoth 浏览器 bundle（动态 import 懒加载，不占首屏体积）
+// pdf 使用 unpdf（纯 JS 的 pdf.js 封装，浏览器可直接运行）
 export interface ExtractedDoc {
   text: string
   kind: 'docx' | 'pdf' | 'text'
@@ -18,7 +18,11 @@ function cleanText(raw: string): string {
 export async function extractText(fileName: string, buf: ArrayBuffer): Promise<ExtractedDoc> {
   const name = fileName.toLowerCase()
   if (name.endsWith('.docx') || name.endsWith('.doc')) {
-    const { value } = await mammoth.extractRawText({ buffer: Buffer.from(buf) })
+    // mammoth 浏览器版：UMD bundle，extractRawText 接受 { arrayBuffer }
+    const mammoth = (await import('mammoth/mammoth.browser')) as {
+      extractRawText: (input: { arrayBuffer: ArrayBuffer }) => Promise<{ value: string }>
+    }
+    const { value } = await mammoth.extractRawText({ arrayBuffer: buf })
     return { text: cleanText(value), kind: 'docx' }
   }
   if (name.endsWith('.pdf')) {

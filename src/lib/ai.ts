@@ -1,16 +1,9 @@
-// LLM 调用层：限流守卫 + 统一重试 + 多供应商
-// 全部仅在服务端使用
-//
-// 供应商解析：
-//   1. 环境变量 SILICONFLOW_API_KEY（在部署平台 Secrets 中配置，不进代码仓库，前端不可见）
-//   2. 内置 SDK 回退（仅沙箱开发调试用；生产部署无 Key 时会给出明确提示）
-// 安全约定：前端 UI 不提供任何 Key 输入入口，Key 永不经过浏览器
-import ZAI from 'z-ai-web-dev-sdk'
-
-// 硅基流动（SiliconFlow）OpenAI 兼容接口
-const SF_BASE_URL = (process.env.SILICONFLOW_BASE_URL ?? 'https://api.siliconflow.cn/v1').replace(/\/$/, '')
-// 默认模型：用户指定的 DeepSeek（可通过 SILICONFLOW_MODEL 环境变量覆盖）
-export const DEFAULT_SF_MODEL = process.env.SILICONFLOW_MODEL ?? 'deepseek-ai/DeepSeek-V4.1-Flash'
+// LLM 调用层（浏览器直连版）：限流守卫 + 统一重试
+// 架构说明：本应用无后端。AI 请求由浏览器直接发往硅基流动
+// OpenAI 兼容接口（已验证支持 CORS），API Key 从设置 store 传入，
+// 只存在于使用者自己的浏览器中，不经过任何第三方服务器。
+// 保留与旧服务端版本一致的能力：429 指数退避守卫、串行排队、
+// 网络错误重试、鉴权类错误快速失败。
 
 // ---------- 限流守卫 ----------
 // 429 后按 12s -> 24s -> 48s -> 60s 指数拉长全局等待窗口；
@@ -67,7 +60,7 @@ export function createRateGuard(): RateGuard {
   return { gate, hit, report }
 }
 
-// ---------- LLM 客户端 ----------
+// ---------- 重试参数 ----------
 const MAX_ATTEMPTS = 6
 const PLAIN_BACKOFF_MS = [1_000, 4_000, 8_000]
 export const LLM_TIMEOUT_MS = 150_000
@@ -87,69 +80,39 @@ export function isAuthErr(e: unknown): boolean {
   return AUTH_ERR_RE.test(msg)
 }
 
-let zaiPromise: Promise<Awaited<ReturnType<typeof ZAI.create>>> | null = null
-
-function getZAI() {
-  if (!zaiPromise) zaiPromise = ZAI.create()
-  return zaiPromise
-}
-
-// ---------- 供应商解析 ----------
+// ---------- 连接配置 ----------
 export type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string }
 
 export interface ChatOptions {
   temperature?: number
   timeoutMs?: number
   guard?: RateGuard
-}
-
-interface SfCredential {
-  kind: 'siliconflow'
+  /** 硅基流动 API Key（必填，由 settings-store 提供） */
   apiKey: string
+  /** 模型名，如 deepseek-ai/DeepSeek-V4.1-Flash */
   model: string
+  /** OpenAI 兼容 Base URL */
+  baseUrl?: string
 }
 
-// 解析本次调用应使用的供应商：环境变量 > 内置回退
-function resolveCredential(_opts: ChatOptions): SfCredential | { kind: 'builtin' } {
-  const key = (process.env.SILICONFLOW_API_KEY ?? '').trim()
-  if (key) {
-    return {
-      kind: 'siliconflow',
-      apiKey: key,
-      model: DEFAULT_SF_MODEL,
-    }
-  }
-  return { kind: 'builtin' }
-}
-
-// 当前 AI 服务状态（供 /api/ai-status 展示，不发起真实请求）
-export function getLlmStatus() {
-  const env = (process.env.SILICONFLOW_API_KEY ?? '').trim()
-  return {
-    provider: env ? 'siliconflow' : 'builtin',
-    model: env ? DEFAULT_SF_MODEL : 'glm-4-plus（内置）',
-    source: env ? 'env' : 'builtin',
-    envKeySet: env.length > 0,
-  }
-}
-
-// 硅基流动对话补全（OpenAI 兼容 /chat/completions）
+// 硅基流动对话补全（OpenAI 兼容 /chat/completions），浏览器直连
 async function sfChat(
   messages: ChatMessage[],
-  cred: SfCredential,
+  opts: { apiKey: string; model: string; baseUrl: string },
   temperature: number,
   signal: AbortSignal
 ): Promise<string> {
+  const base = opts.baseUrl.replace(/\/$/, '')
   let res: Response
   try {
-    res = await fetch(`${SF_BASE_URL}/chat/completions`, {
+    res = await fetch(`${base}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${cred.apiKey}`,
+        Authorization: `Bearer ${opts.apiKey}`,
       },
       body: JSON.stringify({
-        model: cred.model,
+        model: opts.model,
         messages,
         temperature,
         stream: false,
@@ -158,7 +121,7 @@ async function sfChat(
     })
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') throw new Error('LLM 请求超时')
-    throw new Error(`无法连接硅基流动服务：${e instanceof Error ? e.message : String(e)}`)
+    throw new Error(`无法连接 AI 服务：${e instanceof Error ? e.message : String(e)}`)
   }
   if (!res.ok) {
     const body = (await res.text().catch(() => '')).slice(0, 300)
@@ -174,42 +137,24 @@ async function sfChat(
   return text
 }
 
-// 内置 SDK 对话补全（沙箱网关；生产环境无网关时会给出可操作的错误提示）
-async function builtinChat(messages: ChatMessage[], temperature: number): Promise<string> {
-  try {
-    const zai = await getZAI()
-    const res = (await zai.chat.completions.create({
-      messages,
-      thinking: { type: 'disabled' },
-      temperature,
-    })) as { choices?: Array<{ message?: { content?: string } }> }
-    const text = res?.choices?.[0]?.message?.content ?? ''
-    if (!text.trim()) throw new Error('LLM 返回空内容')
-    return text
-  } catch (e) {
-    const err = e instanceof Error ? e : new Error(String(e))
-    throw new Error(
-      `内置 AI 服务不可用（${err.message}）。请在部署平台（Vercel/服务器）的环境变量中配置 SILICONFLOW_API_KEY 后重新部署`
-    )
-  }
-}
-
 // 带限流守卫与重试的对话补全，返回文本内容；失败抛错
-export async function chatSafe(messages: ChatMessage[], opts: ChatOptions = {}): Promise<string> {
+export async function chatSafe(messages: ChatMessage[], opts: ChatOptions): Promise<string> {
   const guard = opts.guard
   const timeoutMs = opts.timeoutMs ?? LLM_TIMEOUT_MS
   const temperature = opts.temperature ?? 0
+  const baseUrl = (opts.baseUrl ?? 'https://api.siliconflow.cn/v1').trim()
   let plainErrCount = 0
   while (true) {
     if (guard) await guard.gate()
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
-      const cred = resolveCredential(opts)
-      const text =
-        cred.kind === 'siliconflow'
-          ? await sfChat(messages, cred, temperature, controller.signal)
-          : await builtinChat(messages, temperature)
+      const text = await sfChat(
+        messages,
+        { apiKey: opts.apiKey, model: opts.model, baseUrl },
+        temperature,
+        controller.signal
+      )
       guard?.report(true)
       return text
     } catch (e) {

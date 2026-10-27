@@ -1,173 +1,211 @@
-// 识别运行缓存（仅服务端，内存态）：
-// 1) chunk 缓存：成功片段按内容指纹缓存，重跑只补失败片段
-// 2) 整轮缓存：仅在「零失败」完整成功时写入，重试/回放直接复用
-// 3) INFLIGHT：同文档进行中去重，新请求等待并回放事件流
-import { createHash } from 'crypto'
-import { AiStreamEvent } from './types'
+// 识别运行缓存（浏览器版，localStorage 持久）：
+// 1) 片段缓存：成功片段按内容指纹缓存，刷新页面后重试只补失败片段（不重复消耗 Key 额度）
+// 2) 整轮缓存：仅在「零失败」完整成功时写入，重试直接复用完整结果
+// 说明：无后端后不再需要 SSE 事件流回放与跨请求 INFLIGHT 广播，
+// 同文档并发去重在 parse-ai 管线内以简单的模块级 Promise 完成。
+'use client'
+
+import { AiStreamEvent, ParsedQuestion } from './types'
 
 const ROUND_TTL_MS = 30 * 60_000 // 整轮缓存 30 分钟
 const CHUNK_TTL_MS = 60 * 60_000 // 片段缓存 1 小时
-const MAX_ROUNDS = 8
+const MAX_ROUNDS = 6
+const CACHE_PREFIX = 'exam-review-parse:'
+// localStorage 缓存软上限（字符数），超出后清理最旧条目
+const CACHE_CHAR_BUDGET = 1_500_000
 
 export interface RoundCacheEntry {
-  events: AiStreamEvent[] // 全量事件（含 done）
-  total: number
+  /** 最终题目（去重/补扫/答案回填后） */
+  questions: ParsedQuestion[]
+  fileName: string
   createdAt: number
 }
 
 interface ChunkEntry {
-  questions: ParsedQuestionLike[]
+  questions: ParsedQuestion[]
   createdAt: number
 }
 
-// 避免循环依赖，这里用最小结构
-export interface ParsedQuestionLike {
-  type: string
-  stem: string
-  options: Array<{ key: string; text: string }>
-  answer: string
-  explanation: string
+// ---------- 哈希（Web Crypto，异步） ----------
+async function sha256Hex(input: string): Promise<string> {
+  const data = new TextEncoder().encode(input)
+  const digest = await crypto.subtle.digest('SHA-256', data)
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
 }
 
-const roundCache = new Map<string, RoundCacheEntry>()
-const chunkCache = new Map<string, ChunkEntry>()
-const inflight = new Map<string, RoundBroadcast>()
-
-export function contentKey(fileName: string, buf: ArrayBuffer): string {
-  const h = createHash('sha256')
-  h.update(fileName)
-  h.update(':')
-  h.update(new Uint8Array(buf).slice(0, 512 * 1024))
-  h.update(`:size=${buf.byteLength}`)
-  return h.digest('hex').slice(0, 24)
+export async function contentKey(fileName: string, buf: ArrayBuffer): Promise<string> {
+  // 采样前 512KB + 文件大小，超长文档不整段哈希（内存/耗时考虑）
+  const head = new Uint8Array(buf.slice(0, 512 * 1024))
+  let binary = ''
+  const CHUNK = 0x8000
+  for (let i = 0; i < head.length; i += CHUNK) {
+    binary += String.fromCharCode(...head.subarray(i, i + CHUNK))
+  }
+  const h = await sha256Hex(`${fileName}:${binary}:size=${buf.byteLength}`)
+  return h.slice(0, 24)
 }
 
-export function chunkKey(runKey: string, text: string, kind: string): string {
-  return createHash('sha256').update(`${runKey}|${kind}|${text}`).digest('hex').slice(0, 20)
+export async function chunkKey(runKey: string, text: string, kind: string): Promise<string> {
+  const h = await sha256Hex(`${runKey}|${kind}|${text}`)
+  return h.slice(0, 20)
+}
+
+// ---------- localStorage 读写 ----------
+function readJSON<T>(key: string): T | null {
+  try {
+    const raw = localStorage.getItem(CACHE_PREFIX + key)
+    if (!raw) return null
+    return JSON.parse(raw) as T
+  } catch {
+    return null
+  }
+}
+
+function writeJSON(key: string, value: unknown): void {
+  try {
+    localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(value))
+  } catch {
+    // 配额不足等异常：清掉自己的缓存再试一次，仍失败则放弃缓存（不影响主流程）
+    try {
+      clearAll()
+      localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(value))
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function removeKey(key: string): void {
+  try {
+    localStorage.removeItem(CACHE_PREFIX + key)
+  } catch {
+    /* ignore */
+  }
+}
+
+function listKeys(prefix: string): string[] {
+  const out: string[] = []
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (k && k.startsWith(CACHE_PREFIX + prefix)) out.push(k.slice(CACHE_PREFIX.length))
+    }
+  } catch {
+    /* ignore */
+  }
+  return out
+}
+
+function clearAll(): void {
+  try {
+    const keys: string[] = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (k && k.startsWith(CACHE_PREFIX)) keys.push(k)
+    }
+    for (const k of keys) localStorage.removeItem(k)
+  } catch {
+    /* ignore */
+  }
 }
 
 // ---------- 整轮缓存 ----------
 export function getRound(key: string): RoundCacheEntry | null {
-  const e = roundCache.get(key)
-  if (!e) return null
+  const e = readJSON<RoundCacheEntry>(`round:${key}`)
+  if (!e || !Array.isArray(e.questions)) return null
   if (Date.now() - e.createdAt > ROUND_TTL_MS) {
-    roundCache.delete(key)
+    removeKey(`round:${key}`)
     return null
   }
-  // 移到末尾，保持 LRU 语义
-  roundCache.delete(key)
-  roundCache.set(key, e)
   return e
 }
 
 // 仅在完整成功（failedChunks === 0）时调用
-export function setRound(key: string, events: AiStreamEvent[], total: number) {
-  while (roundCache.size >= MAX_ROUNDS) {
-    const oldest = roundCache.keys().next().value
-    if (oldest === undefined) break
-    roundCache.delete(oldest)
+export function setRound(key: string, questions: ParsedQuestion[], fileName: string): void {
+  const keys = listKeys('round:')
+  // LRU：按 createdAt 清最旧
+  const entries = keys
+    .map((k) => ({ k, e: readJSON<RoundCacheEntry>(k) }))
+    .filter((x): x is { k: string; e: RoundCacheEntry } => x.e !== null)
+    .sort((a, b) => a.e.createdAt - b.e.createdAt)
+  while (entries.length >= MAX_ROUNDS) {
+    const oldest = entries.shift()
+    if (!oldest) break
+    removeKey(oldest.k)
   }
-  roundCache.set(key, { events, total, createdAt: Date.now() })
+  writeJSON(`round:${key}`, { questions, fileName, createdAt: Date.now() })
 }
 
-export function dropRound(key: string) {
-  roundCache.delete(key)
+export function dropRound(key: string): void {
+  removeKey(`round:${key}`)
 }
 
 // ---------- 片段缓存 ----------
-export function getChunk(key: string): ParsedQuestionLike[] | null {
-  const e = chunkCache.get(key)
-  if (!e) return null
+export function getChunk(key: string): ParsedQuestion[] | null {
+  const e = readJSON<ChunkEntry>(`chunk:${key}`)
+  if (!e || !Array.isArray(e.questions)) return null
   if (Date.now() - e.createdAt > CHUNK_TTL_MS) {
-    chunkCache.delete(key)
+    removeKey(`chunk:${key}`)
     return null
   }
   return e.questions
 }
 
-export function setChunk(key: string, questions: ParsedQuestionLike[]) {
-  if (chunkCache.size > 200) chunkCache.clear()
-  chunkCache.set(key, { questions, createdAt: Date.now() })
+export function setChunk(key: string, questions: ParsedQuestion[]): void {
+  // 空片段不缓存（无意义且占空间）
+  if (questions.length === 0) return
+  writeJSON(`chunk:${key}`, { questions, createdAt: Date.now() })
+  enforceBudget()
 }
 
-// ---------- 进行中广播 ----------
-// 同一文档正在识别时，新请求挂到同一广播上接收事件
-export class RoundBroadcast {
-  readonly key: string
-  private buffers: Array<AiStreamEvent[]> = []
-  private waiters: Array<(ev: AiStreamEvent | null) => void> = []
-  private closed = false
-  startedAt = Date.now()
-
-  constructor(key: string) {
-    this.key = key
-  }
-
-  push(ev: AiStreamEvent) {
-    for (const b of this.buffers) b.push(ev)
-    const ws = this.waiters.splice(0)
-    for (const w of ws) w(ev)
-  }
-
-  // 订阅者读取：从 bufferIndex 读已有事件，之后等待新事件；closed 后返回 null
-  async *subscribe(): AsyncGenerator<AiStreamEvent | null> {
-    const buf: AiStreamEvent[] = []
-    this.buffers.push(buf)
-    let i = 0
-    while (true) {
-      if (i < buf.length) {
-        yield buf[i++]
-        continue
+// 缓存总量预算控制：超出后按时间清最旧
+function enforceBudget(): void {
+  try {
+    let total = 0
+    const items: Array<{ k: string; size: number; createdAt: number }> = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (!k || !k.startsWith(CACHE_PREFIX)) continue
+      const v = localStorage.getItem(k) ?? ''
+      total += k.length + v.length
+      let createdAt = 0
+      try {
+        createdAt = (JSON.parse(v) as { createdAt?: number }).createdAt ?? 0
+      } catch {
+        /* ignore */
       }
-      if (this.closed) {
-        yield null
-        return
-      }
-      const ev = await new Promise<AiStreamEvent | null>((resolve) => this.waiters.push(resolve))
-      if (ev === null) {
-        yield null
-        return
-      }
+      items.push({ k, size: k.length + v.length, createdAt })
     }
-  }
-
-  close() {
-    if (this.closed) return
-    this.closed = true
-    // 立即从进行中注册表移除：后续请求不再挂到已结束的广播上
-    const idx = inflight.get(this.key)
-    if (idx === this) inflight.delete(this.key)
-    const ws = this.waiters.splice(0)
-    for (const w of ws) w(null)
-  }
-
-  get isClosed(): boolean {
-    return this.closed
-  }
-
-  get age(): number {
-    return Date.now() - this.startedAt
+    if (total <= CACHE_CHAR_BUDGET) return
+    items.sort((a, b) => a.createdAt - b.createdAt)
+    for (const it of items) {
+      if (total <= CACHE_CHAR_BUDGET) break
+      localStorage.removeItem(it.k)
+      total -= it.size
+    }
+  } catch {
+    /* ignore */
   }
 }
 
-export function getInflight(key: string): RoundBroadcast | undefined {
-  const b = inflight.get(key)
-  if (!b) return undefined
-  // 已关闭的广播不再对外：新请求应走全新识别或整轮缓存
-  if (b.isClosed) {
-    inflight.delete(key)
-    return undefined
+// 供设置页展示/清理
+export function parseCacheStats(): { rounds: number; chunks: number; bytes: number } {
+  const rounds = listKeys('round:').length
+  const chunks = listKeys('chunk:').length
+  let bytes = 0
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (k && k.startsWith(CACHE_PREFIX)) bytes += k.length + (localStorage.getItem(k)?.length ?? 0)
+    }
+  } catch {
+    /* ignore */
   }
-  // 超过 10 分钟的残留广播视为僵死
-  if (b.age > 600_000) {
-    inflight.delete(key)
-    return undefined
-  }
-  return b
+  return { rounds, chunks, bytes }
 }
 
-export function registerInflight(key: string): RoundBroadcast {
-  const b = new RoundBroadcast(key)
-  inflight.set(key, b)
-  return b
+export function clearParseCache(): void {
+  clearAll()
 }
