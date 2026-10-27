@@ -4,7 +4,7 @@
 
 import { chatSafe, createRateGuard, extractJson } from '@/lib/ai'
 import { useQuestionStore } from '@/lib/question-store'
-import { useSettingsStore } from '@/lib/settings-store'
+import { useSettingsStore, resolveAi, publicAiAvailable } from '@/lib/settings-store'
 import { TYPE_LABELS, QuestionType } from '@/lib/types'
 
 const BATCH = 4
@@ -18,10 +18,15 @@ const SYSTEM = `你是考试解析生成器。为每道题生成简明准确的�
 
 export async function runExplainBatch(limit = 8): Promise<{ updated: number; remaining: number }> {
   const s = useSettingsStore.getState()
-  if (!s.hasKey()) {
-    throw new Error('尚未配置 AI：请点击右上角⚙设置，填入硅基流动 API Key')
+  const ai = resolveAi(s)
+  if (!ai.ok) {
+    throw new Error(
+      s.source === 'public' && !publicAiAvailable
+        ? '公共 API 未配置：请点击右上角⚙设置，切换到「我的 API」填入 Key'
+        : '我的 API 未配置完整：请点击右上角⚙设置，填入 API Key'
+    )
   }
-  const llm = { apiKey: s.apiKey.trim(), model: s.model.trim(), baseUrl: s.baseUrl.trim() }
+  const llm = { apiKey: ai.key, model: ai.model, baseUrl: ai.baseUrl }
 
   const all = useQuestionStore.getState().questions
   const missing = all.filter((q) => !q.explanation.trim()).slice(0, Math.min(Math.max(limit, 1), 12) * BATCH)

@@ -29,6 +29,7 @@ import {
 import { StoredQuestion } from '@/lib/api-client'
 import { useQuestionStore } from '@/lib/question-store'
 import { QuestionType, TYPE_LABELS } from '@/lib/types'
+import { userScopedKey } from '@/lib/user-store'
 
 type Phase = 'setup' | 'session' | 'result'
 type Mode = 'practice' | 'recite'
@@ -47,7 +48,8 @@ interface SavedSession {
   ts: number
 }
 
-const SESSION_KEY = 'exam_study_session'
+// 会话存档键（按用户隔离）
+const sessionKey = () => userScopedKey('exam_study_session')
 
 function shuffleList<T>(list: T[]) {
   for (let i = list.length - 1; i > 0; i--) {
@@ -90,7 +92,7 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
   // 读取「继续上次」存档（仅客户端）
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(SESSION_KEY)
+      const raw = localStorage.getItem(sessionKey())
       if (!raw) return
       const s = JSON.parse(raw) as SavedSession
       if (s && s.v === 1 && Array.isArray(s.ids) && s.ids.length > 0) setSaved(s)
@@ -141,7 +143,7 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
 
   const clearSaved = useCallback(() => {
     try {
-      localStorage.removeItem(SESSION_KEY)
+      localStorage.removeItem(sessionKey())
     } catch {
       /* ignore */
     }
@@ -163,7 +165,7 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
         ts: Date.now(),
       }
       try {
-        localStorage.setItem(SESSION_KEY, JSON.stringify(s))
+        localStorage.setItem(sessionKey(), JSON.stringify(s))
       } catch {
         /* ignore */
       }

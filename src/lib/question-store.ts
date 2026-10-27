@@ -1,15 +1,15 @@
-// 共享题库 store（纯本地版）：数据存浏览器 IndexedDB（idb-keyval）
+// 共享题库 store（多用户本地版）：数据存浏览器 IndexedDB（idb-keyval，按用户隔离）
 // - 无数据库、无后端：题库/进度/错题本/收藏全部本机持久化，秒读秒写
 // - 三 Tab 共用一份数据，切换零等待
 // - 星标/错题等操作直接本地计算（原服务端维护的逻辑已内置）
-// - 变更后按设置触发 GitHub 云同步（防抖，见 github-sync）
+// - 换设备迁移：设置 → 导出/导入文件
 'use client'
 
 import { create } from 'zustand'
 import { createJSONStorage, persist } from 'zustand/middleware'
 import { get as idbGet, set as idbSet, del as idbDel } from 'idb-keyval'
 import { normalizeStem, ParsedQuestion } from './types'
-import { scheduleAutoSync, registerQuestionsGetter } from './github-sync'
+import { userScopedKey } from './user-store'
 
 // 与原服务端版本一致的数据结构
 export interface StoredQuestion {
@@ -155,7 +155,6 @@ export const useQuestionStore = create<QuestionStore>()(
                   : { wrong: false } // removeWrong
         get().patchLocal(id, patch)
         const next = get().questions.find((q) => q.id === id)
-        scheduleAutoSync()
         return {
           starred: next!.starred,
           wrong: next!.wrong,
@@ -185,19 +184,16 @@ export const useQuestionStore = create<QuestionStore>()(
           }))
         if (rows.length > 0) {
           set((s) => ({ questions: [...s.questions, ...rows], loadedOnce: true }))
-          scheduleAutoSync()
         }
         return rows.length
       },
 
       remove: (id) => {
         get().removeLocal(id)
-        scheduleAutoSync()
       },
 
       clear: () => {
         get().resetLocal()
-        scheduleAutoSync()
       },
 
       updateExplanations: (items) => {
@@ -218,7 +214,9 @@ export const useQuestionStore = create<QuestionStore>()(
             }
           }),
         }))
-        if (updated > 0) scheduleAutoSync()
+        if (updated > 0) {
+          // 已写回本地
+        }
         return updated
       },
 
@@ -238,7 +236,6 @@ export const useQuestionStore = create<QuestionStore>()(
           }))
         if (mode === 'replace') {
           set({ questions: rows, loadedOnce: true })
-          scheduleAutoSync()
           return rows.length
         }
         // merge：按题干去重，只补本机没有的题（保留本机已有题的进度）
@@ -246,13 +243,12 @@ export const useQuestionStore = create<QuestionStore>()(
         const toAdd = rows.filter((q) => !existing.has(normalizeStem(q.stem)))
         if (toAdd.length > 0) {
           set((s) => ({ questions: [...s.questions, ...toAdd], loadedOnce: true }))
-          scheduleAutoSync()
         }
         return toAdd.length
       },
     }),
     {
-      name: 'exam-review-questions',
+      name: userScopedKey('exam-review-questions'),
       storage: createJSONStorage(() => idbStorage),
       partialize: (s) => ({ questions: s.questions }) as unknown as QuestionStore,
       onRehydrateStorage: () => () => {
@@ -273,6 +269,3 @@ export function dedupeByStem(qs: StoredQuestion[]): StoredQuestion[] {
     return true
   })
 }
-
-// 注册云同步数据源（避免循环依赖）
-registerQuestionsGetter(() => useQuestionStore.getState().questions)

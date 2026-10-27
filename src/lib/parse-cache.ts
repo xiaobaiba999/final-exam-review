@@ -6,6 +6,7 @@
 'use client'
 
 import { AiStreamEvent, ParsedQuestion } from './types'
+import { userScopedKey } from './user-store'
 
 const ROUND_TTL_MS = 30 * 60_000 // 整轮缓存 30 分钟
 const CHUNK_TTL_MS = 60 * 60_000 // 片段缓存 1 小时
@@ -52,10 +53,15 @@ export async function chunkKey(runKey: string, text: string, kind: string): Prom
   return h.slice(0, 20)
 }
 
+// 当前用户的缓存前缀（切换用户会刷新页面，页内一致）
+function scopedPrefix(): string {
+  return userScopedKey(CACHE_PREFIX)
+}
+
 // ---------- localStorage 读写 ----------
 function readJSON<T>(key: string): T | null {
   try {
-    const raw = localStorage.getItem(CACHE_PREFIX + key)
+    const raw = localStorage.getItem(scopedPrefix() + key)
     if (!raw) return null
     return JSON.parse(raw) as T
   } catch {
@@ -65,12 +71,12 @@ function readJSON<T>(key: string): T | null {
 
 function writeJSON(key: string, value: unknown): void {
   try {
-    localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(value))
+    localStorage.setItem(scopedPrefix() + key, JSON.stringify(value))
   } catch {
     // 配额不足等异常：清掉自己的缓存再试一次，仍失败则放弃缓存（不影响主流程）
     try {
       clearAll()
-      localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(value))
+      localStorage.setItem(scopedPrefix() + key, JSON.stringify(value))
     } catch {
       /* ignore */
     }
@@ -79,7 +85,7 @@ function writeJSON(key: string, value: unknown): void {
 
 function removeKey(key: string): void {
   try {
-    localStorage.removeItem(CACHE_PREFIX + key)
+    localStorage.removeItem(scopedPrefix() + key)
   } catch {
     /* ignore */
   }
@@ -87,10 +93,11 @@ function removeKey(key: string): void {
 
 function listKeys(prefix: string): string[] {
   const out: string[] = []
+  const full = scopedPrefix()
   try {
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i)
-      if (k && k.startsWith(CACHE_PREFIX + prefix)) out.push(k.slice(CACHE_PREFIX.length))
+      if (k && k.startsWith(full + prefix)) out.push(k.slice(full.length))
     }
   } catch {
     /* ignore */
@@ -100,10 +107,11 @@ function listKeys(prefix: string): string[] {
 
 function clearAll(): void {
   try {
+    const full = scopedPrefix()
     const keys: string[] = []
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i)
-      if (k && k.startsWith(CACHE_PREFIX)) keys.push(k)
+      if (k && k.startsWith(full)) keys.push(k)
     }
     for (const k of keys) localStorage.removeItem(k)
   } catch {
@@ -167,7 +175,7 @@ function enforceBudget(): void {
     const items: Array<{ k: string; size: number; createdAt: number }> = []
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i)
-      if (!k || !k.startsWith(CACHE_PREFIX)) continue
+      if (!k || !k.startsWith(scopedPrefix())) continue
       const v = localStorage.getItem(k) ?? ''
       total += k.length + v.length
       let createdAt = 0
@@ -198,7 +206,7 @@ export function parseCacheStats(): { rounds: number; chunks: number; bytes: numb
   try {
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i)
-      if (k && k.startsWith(CACHE_PREFIX)) bytes += k.length + (localStorage.getItem(k)?.length ?? 0)
+      if (k && k.startsWith(scopedPrefix())) bytes += k.length + (localStorage.getItem(k)?.length ?? 0)
     }
   } catch {
     /* ignore */

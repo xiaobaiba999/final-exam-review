@@ -20,7 +20,7 @@ import {
   parseAnswerKeys,
 } from '@/lib/qa-parse'
 import { contentKey, chunkKey, getChunk, setChunk, getRound, setRound, dropRound } from '@/lib/parse-cache'
-import { useSettingsStore } from '@/lib/settings-store'
+import { useSettingsStore, resolveAi, publicAiAvailable } from '@/lib/settings-store'
 import { AiStreamEvent, ParsedQuestion } from '@/lib/types'
 
 const LLM_CONCURRENCY = 3
@@ -65,12 +65,17 @@ export async function runParsePipeline(opts: RunPipelineOptions): Promise<void> 
   const { file, force = false, signal, onEvent } = opts
   const fileName = file.name || '未命名文档'
 
-  // 前置检查：Key 必须先在设置页配置
+  // 前置检查：AI 必须可用（公共 API 或自己的 Key）
   const s = useSettingsStore.getState()
-  if (!s.hasKey()) {
-    throw new PipelineError('尚未配置 AI：请点击右上角⚙设置，填入硅基流动 API Key 后再识别')
+  const ai = resolveAi(s)
+  if (!ai.ok) {
+    throw new PipelineError(
+      s.source === 'public' && !publicAiAvailable
+        ? '公共 API 未配置：请点击右上角⚙设置，切换到「我的 API」填入 Key 后再识别'
+        : '我的 API 未配置完整：请点击右上角⚙设置，填入 API Key 后再识别'
+    )
   }
-  const llm = { apiKey: s.apiKey.trim(), model: s.model.trim(), baseUrl: s.baseUrl.trim() }
+  const llm = { apiKey: ai.key, model: ai.model, baseUrl: ai.baseUrl }
 
   if (file.size > 30 * 1024 * 1024) {
     throw new PipelineError('文件过大（上限 30MB）')
