@@ -27,6 +27,7 @@ import {
   Download,
   Eye,
   EyeOff,
+  FolderPlus,
   Loader2,
   Settings,
   ShieldCheck,
@@ -35,7 +36,7 @@ import {
 } from 'lucide-react'
 import { useSettingsStore } from '@/lib/settings-store'
 import { useQuestionStore, StoredQuestion } from '@/lib/question-store'
-import { syncToGitHub, pullFromGitHub, buildReviewData, ReviewData } from '@/lib/github-sync'
+import { syncToGitHub, pullFromGitHub, buildReviewData, ReviewData, ensureDataRepo } from '@/lib/github-sync'
 import { chatSafe } from '@/lib/ai'
 import { clearParseCache } from '@/lib/parse-cache'
 
@@ -47,6 +48,7 @@ export function SettingsDialog() {
   const [testing, setTesting] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [pulling, setPulling] = useState(false)
+  const [provisioning, setProvisioning] = useState(false)
 
   const s = useSettingsStore()
   const questions = useQuestionStore((st) => st.questions)
@@ -88,6 +90,27 @@ export function SettingsDialog() {
   const applyRestored = useCallback((remote: StoredQuestion[], mode: 'replace' | 'merge'): number => {
     return useQuestionStore.getState().restoreAll(remote, mode)
   }, [])
+
+  // ---------- 一键准备私有数据仓库 ----------
+  const provisionRepo = useCallback(async () => {
+    setProvisioning(true)
+    try {
+      const repo = await ensureDataRepo(s.ghPat)
+      update({ ghRepo: repo })
+      toast({
+        title: '✓ 数据仓库已就绪',
+        description: `${repo}（私有）已自动创建并填入，点「上传备份」即可首次同步`,
+      })
+    } catch (e) {
+      toast({
+        title: '自动创建失败',
+        description: e instanceof Error ? e.message : String(e),
+        variant: 'destructive',
+      })
+    } finally {
+      setProvisioning(false)
+    }
+  }, [s.ghPat, update, toast])
 
   // ---------- 云同步 ----------
   const doUpload = useCallback(async () => {
@@ -278,8 +301,8 @@ export function SettingsDialog() {
                 </div>
               </div>
               <p className="text-xs leading-relaxed text-muted-foreground">
-                像 state.json 一样把学习数据存到你自己的仓库（data/review-data.json），
-                换手机/电脑可恢复。数据不含 Key 和 PAT。
+                像 Zepp-Steps-Automation 的 state.json 一样，把学习数据存到你自己的 GitHub 私有仓库
+                （data/review-data.json），换手机/电脑可恢复。数据不含 Key 和 PAT。
               </p>
               <div className="space-y-1.5">
                 <Label htmlFor="set-pat">GitHub Token（PAT）</Label>
@@ -304,15 +327,27 @@ export function SettingsDialog() {
                   </Button>
                 </div>
               </div>
+              <Button
+                variant="outline"
+                className="min-h-11 w-full"
+                onClick={() => void provisionRepo()}
+                disabled={provisioning || s.ghPat.trim().length < 10}
+              >
+                {provisioning ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FolderPlus className="mr-2 h-4 w-4" />}
+                一键创建私有数据仓库
+              </Button>
               <div className="space-y-1.5">
-                <Label htmlFor="set-repo">仓库名</Label>
+                <Label htmlFor="set-repo">仓库名（owner/repo）</Label>
                 <Input
                   id="set-repo"
-                  placeholder="xiaobaiba999/final-exam-review"
+                  placeholder="自动创建：你的用户名/final-exam-review-data"
                   value={s.ghRepo}
                   onChange={(e) => update({ ghRepo: e.target.value })}
                   className="h-11"
                 />
+                <p className="text-[11px] text-muted-foreground">
+                  推荐用私有数据仓库存学习数据；不要填本代码仓库，否则每次同步都会触发重新部署
+                </p>
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <Button variant="outline" className="min-h-11" onClick={() => void doUpload()} disabled={uploading}>

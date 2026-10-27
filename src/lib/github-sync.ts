@@ -25,6 +25,56 @@ export function buildReviewData(questions: StoredQuestion[]): ReviewData {
   }
 }
 
+// ---------- 一键准备私有数据仓库 ----------
+// 仿 Zepp-Steps-Automation 的「只要配好凭据，其余自动」体验：
+// 检测 PAT → 获取用户名 → 数据仓库不存在则自动创建（私有）→ 返回 owner/repo
+export async function ensureDataRepo(pat: string): Promise<string> {
+  const token = pat.trim()
+  if (token.length < 10) throw new Error('请先填写 GitHub Token（PAT）')
+
+  const headers: HeadersInit = {
+    Accept: 'application/vnd.github+json',
+    Authorization: `Bearer ${token}`,
+    'X-GitHub-Api-Version': '2022-11-28',
+  }
+
+  // 1. 获取用户名
+  const uRes = await fetch('https://api.github.com/user', { headers, cache: 'no-store' })
+  if (uRes.status === 401) throw new Error('GitHub Token 无效或已过期（401），请检查设置')
+  if (!uRes.ok) throw new Error(`GitHub 用户信息获取失败（${uRes.status}）`)
+  const login = ((await uRes.json()) as { login?: string }).login
+  if (!login) throw new Error('无法识别 GitHub 用户名')
+  const repo = `${login}/final-exam-review-data`
+
+  // 2. 仓库已存在则直接返回
+  const rRes = await fetch(`https://api.github.com/repos/${repo}`, { headers, cache: 'no-store' })
+  if (rRes.ok) return repo
+  if (rRes.status !== 404) throw new Error(`GitHub 仓库检测失败（${rRes.status}）`)
+
+  // 3. 不存在 → 自动创建（私有）
+  const cRes = await fetch('https://api.github.com/user/repos', {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: 'final-exam-review-data',
+      private: true,
+      description: '期末复习工具云同步数据仓库（题库/进度/错题本）',
+      auto_init: true,
+      has_wiki: false,
+      has_projects: false,
+      has_issues: false,
+    }),
+  })
+  if (!cRes.ok) {
+    const j = (await cRes.json().catch(() => ({}))) as { message?: string }
+    throw new Error(
+      `自动创建仓库失败（${cRes.status}）：${j.message ?? cRes.statusText}。` +
+        `可到 github.com/new 手动创建私有仓库后，在下方填写「用户名/final-exam-review-data」`
+    )
+  }
+  return repo
+}
+
 // ---------- 内部：Contents API ----------
 function apiBase(repo: string): string {
   return `https://api.github.com/repos/${repo}/contents/${DATA_PATH}`

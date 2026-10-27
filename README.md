@@ -31,9 +31,11 @@ AI 驱动的大学期末复习工具：把不规范的 Word/PDF 题库文档一�
 1. 准备 GitHub PAT（Personal Access Token）：
    - **classic**：在 GitHub → Settings → Developer settings 创建，勾选 **repo** 权限
    - **fine-grained**：仅勾选目标仓库的 **Contents 读写** 权限（更安全，推荐）
-2. 在本应用设置页填入 **PAT + 目标仓库名**（用你自己的私有/公开仓库即可）
+2. 在本应用设置页填入 PAT，点 **「一键创建私有数据仓库」**：应用自动检测用户名并创建私有仓库 `final-exam-review-data`（也可手动创建后填入仓库名）
 3. 点同步：题库、进度、错题本、收藏（**不含 API Key 和 PAT 本身**）会以 JSON 形式提交到该仓库的 `data/review-data.json`
-4. 换新设备时：打开页面 → 设置 → 填同样的 PAT + 仓库名 → 从仓库拉取即可恢复
+4. 换新设备时：打开页面 → 设置 → 填同样的 PAT → 从仓库拉取即可恢复
+
+> 推荐用独立私有数据仓库存学习数据；不要填本代码仓库，否则每次自动同步都会触发 Pages 重新部署，且题库会公开可见
 
 ## 🛠 部署
 
