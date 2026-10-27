@@ -13,9 +13,51 @@ export const SILICONFLOW_BASE = 'https://api.siliconflow.cn/v1'
 export const DEEPSEEK_BASE = 'https://api.deepseek.com/v1'
 
 // ---------- 公共 API（构建时通过环境变量注入，用户无需任何配置即可用） ----------
-// NEXT_PUBLIC_PUBLIC_AI_KEY / NEXT_PUBLIC_PUBLIC_AI_BASE_URL / NEXT_PUBLIC_PUBLIC_AI_MODEL
+// 注入方式（构建环境变量，二选一，值不进仓库）:
+//   NEXT_PUBLIC_PUBLIC_AI_KEY_B64 —— 推荐：乱序编码注入，前端产物（bundle）中不含明文 Key
+//   NEXT_PUBLIC_PUBLIC_AI_KEY     —— 明文注入（不推荐：bundle 里可直接搜到）
+// 可选：NEXT_PUBLIC_PUBLIC_AI_BASE_URL / NEXT_PUBLIC_PUBLIC_AI_MODEL
+// 乱序编码规则：base64(key) → 整串字符反转 → 平均切成 4 段用 '|' 连接。
+// 运行时在此还原；纯 JS 实现，SSR / CSR 结果一致，无水合风险。
+// 注意：浏览器直连架构下 Key 最终会出现在请求头里，乱序编码只是防
+// 「打开 bundle 直接搜明文」的浅层泄露，无法对抗抓包，属行业无解项。
+const B64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+function b64Decode(input: string): string {
+  let out = ''
+  let bits = 0
+  let acc = 0
+  for (const ch of input) {
+    const idx = B64_CHARS.indexOf(ch)
+    if (idx === -1) continue // 跳过 padding / 换行等非法字符
+    acc = (acc << 6) | idx
+    bits += 6
+    if (bits >= 8) {
+      bits -= 8
+      out += String.fromCharCode((acc >> bits) & 0xff)
+    }
+  }
+  return out
+}
+
+function decodeScrambledB64(input: string): string {
+  const raw = input.replace(/\s+/g, '')
+  if (!raw) return ''
+  try {
+    const b64 = raw.split('|').join('').split('').reverse().join('')
+    return b64Decode(b64).trim()
+  } catch {
+    return ''
+  }
+}
+
+const PUBLIC_KEY_SCRAMBLED = String(process.env.NEXT_PUBLIC_PUBLIC_AI_KEY_B64 ?? '').trim()
+const PUBLIC_KEY_FROM_SCRAMBLED = PUBLIC_KEY_SCRAMBLED ? decodeScrambledB64(PUBLIC_KEY_SCRAMBLED) : ''
+
 export const PUBLIC_AI = {
-  key: String(process.env.NEXT_PUBLIC_PUBLIC_AI_KEY ?? '').trim(),
+  key:
+    PUBLIC_KEY_FROM_SCRAMBLED ||
+    String(process.env.NEXT_PUBLIC_PUBLIC_AI_KEY ?? '').trim(),
   baseUrl: String(process.env.NEXT_PUBLIC_PUBLIC_AI_BASE_URL ?? SILICONFLOW_BASE).trim(),
   model: String(process.env.NEXT_PUBLIC_PUBLIC_AI_MODEL ?? DEFAULT_MODEL).trim(),
 }

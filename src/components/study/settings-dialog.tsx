@@ -223,7 +223,7 @@ export function SettingsDialog() {
                         </Badge>
                       )}
                     </p>
-                    <p className="truncate text-[11px] text-muted-foreground">站长内置，免配置直接用</p>
+                    <p className="truncate text-[11px] text-muted-foreground">站长内置 · 密钥已隐藏 · 免配置直接用</p>
                   </div>
                   {sourcePublic && <Check className="h-4 w-4 shrink-0 text-primary" aria-hidden />}
                 </button>
@@ -267,7 +267,8 @@ export function SettingsDialog() {
                 <p className="rounded-lg bg-muted/50 p-3 text-xs leading-relaxed text-muted-foreground">
                   {publicAiAvailable ? (
                     <>
-                      正在使用公共 API（{PUBLIC_AI.model}）。适合轻度使用；识别量大或遇到限流时，
+                      正在使用公共 API（{PUBLIC_AI.model}）。密钥已内置隐藏，不会对外显示。
+                      适合轻度使用；识别量大或遇到限流时，
                       建议切换到「我的 API」用自己的 Key。
                     </>
                   ) : (
