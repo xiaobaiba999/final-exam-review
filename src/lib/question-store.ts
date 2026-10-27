@@ -8,7 +8,7 @@
 import { create } from 'zustand'
 import { createJSONStorage, persist } from 'zustand/middleware'
 import { get as idbGet, set as idbSet, del as idbDel } from 'idb-keyval'
-import { normalizeStem, ParsedQuestion } from './types'
+import { normalizeStem, ParsedQuestion, ChatMsg } from './types'
 import { userScopedKey } from './user-store'
 
 // 与原服务端版本一致的数据结构
@@ -29,6 +29,8 @@ export interface StoredQuestion {
   rightCount: number
   /** 累计答错次数 */
   wrongCount: number
+  /** 本题追问对话记录（用户向 AI 追问的多轮消息） */
+  chat?: ChatMsg[]
 }
 
 export type QuestionAction = 'star' | 'unstar' | 'markWrong' | 'markRight' | 'removeWrong'
@@ -95,6 +97,10 @@ interface QuestionStore {
   clear: () => void
   /** 批量更新解析（AI 解析补全后写回） */
   updateExplanations: (items: Array<{ id: string; answer: string; explanation: string }>) => number
+  /** 追加一条追问消息（流式完成后调用，一次写库） */
+  appendChat: (id: string, msg: ChatMsg) => void
+  /** 清空本题追问对话 */
+  clearChat: (id: string) => void
   /** 云端/文件恢复：直接写入完整题目数据（保留 id 与学习进度） */
   restoreAll: (questions: StoredQuestion[], mode: 'replace' | 'merge') => number
 }
@@ -181,6 +187,7 @@ export const useQuestionStore = create<QuestionStore>()(
             wrong: false,
             rightCount: 0,
             wrongCount: 0,
+            chat: [],
           }))
         if (rows.length > 0) {
           set((s) => ({ questions: [...s.questions, ...rows], loadedOnce: true }))
@@ -220,6 +227,18 @@ export const useQuestionStore = create<QuestionStore>()(
         return updated
       },
 
+      appendChat: (id, msg) =>
+        set((s) => ({
+          questions: s.questions.map((q) =>
+            q.id === id ? { ...q, chat: [...(q.chat ?? []), msg] } : q
+          ),
+        })),
+
+      clearChat: (id) =>
+        set((s) => ({
+          questions: s.questions.map((q) => (q.id === id ? { ...q, chat: [] } : q)),
+        })),
+
       restoreAll: (incoming, mode) => {
         const rows = incoming
           .filter((q) => q && q.stem && q.stem.trim())
@@ -233,6 +252,7 @@ export const useQuestionStore = create<QuestionStore>()(
             wrong: Boolean(q.wrong),
             rightCount: Number(q.rightCount) || 0,
             wrongCount: Number(q.wrongCount) || 0,
+            chat: Array.isArray(q.chat) ? q.chat : [],
           }))
         if (mode === 'replace') {
           set({ questions: rows, loadedOnce: true })

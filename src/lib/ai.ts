@@ -126,13 +126,90 @@ async function sfChat(
   if (!res.ok) {
     const body = (await res.text().catch(() => '')).slice(0, 300)
     // 错误信息中带上状态码，便于 isRateErr 识别 429 触发限流守卫
-    throw new Error(`硅基流动 HTTP ${res.status}：${body || res.statusText}`)
+    throw new Error(`AI 服务 HTTP ${res.status}：${body || res.statusText}`)
   }
   const data = (await res.json().catch(() => null)) as {
     choices?: Array<{ message?: { content?: string; reasoning_content?: string } }>
   } | null
   const msg = data?.choices?.[0]?.message
   const text = String(msg?.content ?? '').trim() || String(msg?.reasoning_content ?? '').trim()
+  if (!text) throw new Error('LLM 返回空内容')
+  return text
+}
+
+// 流式对话补全（OpenAI 兼容 SSE），浏览器直连；onDelta 每次回调当前累计全文
+async function sfChatStream(
+  messages: ChatMessage[],
+  opts: { apiKey: string; model: string; baseUrl: string },
+  temperature: number,
+  signal: AbortSignal,
+  onDelta: (full: string, delta: string) => void
+): Promise<string> {
+  const base = opts.baseUrl.replace(/\/$/, '')
+  let res: Response
+  try {
+    res = await fetch(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${opts.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: opts.model,
+        messages,
+        temperature,
+        stream: true,
+      }),
+      signal,
+    })
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') throw new Error('LLM 请求超时')
+    throw new Error(`无法连接 AI 服务：${e instanceof Error ? e.message : String(e)}`)
+  }
+  if (!res.ok) {
+    const body = (await res.text().catch(() => '')).slice(0, 300)
+    throw new Error(`AI 服务 HTTP ${res.status}：${body || res.statusText}`)
+  }
+  if (!res.body) throw new Error('AI 服务未返回数据流')
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  let acc = ''
+  let reasoning = ''
+  let streamDone = false
+  while (!streamDone) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    const lines = buf.split('\n')
+    buf = lines.pop() ?? ''
+    for (const line of lines) {
+      const t = line.trim()
+      if (!t.startsWith('data:')) continue
+      const payload = t.slice(5).trim()
+      if (payload === '[DONE]') {
+        streamDone = true
+        break
+      }
+      try {
+        const obj = JSON.parse(payload) as {
+          choices?: Array<{ delta?: { content?: string; reasoning_content?: string } }>
+        }
+        const d = obj.choices?.[0]?.delta
+        const piece = String(d?.content ?? '')
+        if (piece) {
+          acc += piece
+          onDelta(acc, piece)
+        } else {
+          reasoning += String(d?.reasoning_content ?? '')
+        }
+      } catch {
+        /* 忽略无法解析的心跳/杂项行 */
+      }
+    }
+  }
+  const text = acc.trim() || reasoning.trim()
   if (!text) throw new Error('LLM 返回空内容')
   return text
 }
@@ -166,6 +243,58 @@ export async function chatSafe(messages: ChatMessage[], opts: ChatOptions): Prom
       if (isAuthErr(err)) {
         throw err // Key 无效/模型不存在等：重试无意义，立即失败
       }
+      const backoff = PLAIN_BACKOFF_MS[Math.min(plainErrCount, PLAIN_BACKOFF_MS.length - 1)]
+      plainErrCount++
+      if (plainErrCount >= MAX_ATTEMPTS) throw err
+      await new Promise<void>((r) => setTimeout(r, backoff))
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+}
+
+// 带限流守卫与重试的流式对话补全。
+// 重试策略：尚未向用户输出任何内容时才允许重试（429 走守卫惩罚窗口）；
+// 已经流式输出过部分内容则直接抛错，避免重复输出，由调用方保留已生成部分。
+export async function chatSafeStream(
+  messages: ChatMessage[],
+  opts: ChatOptions,
+  onDelta: (full: string, delta: string) => void
+): Promise<string> {
+  const guard = opts.guard
+  const timeoutMs = opts.timeoutMs ?? LLM_TIMEOUT_MS
+  const temperature = opts.temperature ?? 0
+  const baseUrl = (opts.baseUrl ?? 'https://api.siliconflow.cn/v1').trim()
+  let plainErrCount = 0
+  while (true) {
+    if (guard) await guard.gate()
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    let received = false
+    try {
+      const text = await sfChatStream(
+        messages,
+        { apiKey: opts.apiKey, model: opts.model, baseUrl },
+        temperature,
+        controller.signal,
+        (full, delta) => {
+          received = true
+          onDelta(full, delta)
+        }
+      )
+      guard?.report(true)
+      return text
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e))
+      if (isRateErr(err)) {
+        guard?.hit()
+        if (!received) continue // 惩罚窗口由 gate() 兑住，不计入普通退避
+        throw err
+      }
+      if (isAuthErr(err)) {
+        throw err // Key 无效/模型不存在等：重试无意义，立即失败
+      }
+      if (received) throw err // 已输出部分内容，重试会导致重复
       const backoff = PLAIN_BACKOFF_MS[Math.min(plainErrCount, PLAIN_BACKOFF_MS.length - 1)]
       plainErrCount++
       if (plainErrCount >= MAX_ATTEMPTS) throw err

@@ -2,7 +2,7 @@
 
 // 登录门：未登录时整屏显示（注册/登录），登录后渲染 children
 // 本地账号体系：数据按用户隔离存本机，换设备用导出/导入文件迁移
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { BookOpen, Eye, EyeOff, Loader2, LogIn, UserPlus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -15,12 +15,25 @@ export function LoginGate({ children }: { children: React.ReactNode }) {
   const register = useUserStore((s) => s.register)
   const login = useUserStore((s) => s.login)
 
+  // 首渲（含 SSR）返回中性 loading，挂载后再读本地会话：
+  // 避免「服务端渲染登录门 / 客户端已有会话」的水合不一致（每次刷新整树重建）
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => setMounted(true), [])
+
   const [mode, setMode] = useState<'login' | 'register'>(() => (users.length === 0 ? 'register' : 'login'))
   const [name, setName] = useState('')
   const [pass, setPass] = useState('')
   const [showPass, setShowPass] = useState(false)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+
+  if (!mounted) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-muted/30">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" aria-hidden />
+      </div>
+    )
+  }
 
   if (current) return <>{children}</>
 

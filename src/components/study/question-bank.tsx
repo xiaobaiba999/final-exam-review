@@ -7,7 +7,6 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Separator } from '@/components/ui/separator'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -32,6 +31,7 @@ import {
 } from 'lucide-react'
 import { deleteQuestion, clearQuestions, runExplain } from '@/lib/api-client'
 import { useQuestionStore } from '@/lib/question-store'
+import { ExplanationWithAsk } from '@/components/study/ask-ai'
 import { TYPE_LABELS, QuestionType } from '@/lib/types'
 
 type Scope = 'all' | 'wrong' | 'starred'
@@ -381,15 +381,8 @@ export function QuestionBank({ onGoImport }: { onGoImport: () => void }) {
                           {q.answer || '（原文无答案）'}
                         </span>
                       </p>
-                      {q.explanation && (
-                        <>
-                          <Separator />
-                          <p className="text-xs leading-relaxed text-muted-foreground">
-                            <span className="font-medium text-foreground">解析：</span>
-                            {q.explanation}
-                          </p>
-                        </>
-                      )}
+                      {/* 解析 + AI 追问 */}
+                      <ExplanationWithAsk question={q} />
                       <div className="flex flex-wrap justify-end gap-1 pt-1">
                         {q.wrong && (
                           <Button

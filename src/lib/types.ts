@@ -16,6 +16,13 @@ export interface QuestionOption {
   text: string
 }
 
+// 追问对话消息（每题独立保存，随题目持久化与导出迁移）
+export interface ChatMsg {
+  role: 'user' | 'assistant'
+  content: string
+  ts: number
+}
+
 // LLM 抽取出的原始题目（流式预览 / 入库前统一使用）
 export interface ParsedQuestion {
   type: QuestionType

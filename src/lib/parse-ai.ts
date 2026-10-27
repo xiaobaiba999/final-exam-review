@@ -18,6 +18,7 @@ import {
   applyAnswerKeys,
   hasAnswerKeyRun,
   parseAnswerKeys,
+  normalizeJudgeAnswer,
 } from '@/lib/qa-parse'
 import { contentKey, chunkKey, getChunk, setChunk, getRound, setRound, dropRound } from '@/lib/parse-cache'
 import { useSettingsStore, resolveAi, publicAiAvailable } from '@/lib/settings-store'
@@ -27,14 +28,21 @@ const LLM_CONCURRENCY = 3
 const ROUND_WAITS = [30_000, 60_000, 60_000]
 
 const EXTRACT_SYSTEM = `你是题库数字化引擎。从给定文本片段中逐题抽取全部题目，规则：
-1. 逐题完整抽取：一道都不能漏、不能合并、不能改写或缩写题干。
-2. 题干必须保留原文完整文字，包括原文自带的题号前缀（如 "12."）；原文没有编号的题目绝对不要自行添加编号。
-3. 单选题 type:"single"，options 为 [{"key":"A","text":"选项原文"},...]，answer 为正确选项字母如 "C"。
-4. 判断题 type:"judge"，answer 只能是 "正确" 或 "错误"。
-5. 填空题 type:"blank"，answer 依原文填空内容；简答题/问答/论述 type:"short"，answer 为参考答案。
-6. 题干、选项、答案都必须来自片段原文。若片段本身没有题目（例如只有答案表、代码或说明文字），输出 {"questions":[]}。
-7. 片段开头或结尾可能被截断：无法辨认完整题干的残缺题跳过，其余必须输出。
-8. 只输出 JSON：{"questions":[...]}，不要任何解释文字。`
+1. 逐题完整抽取：一道都不能漏、不能合并、不能改写或缩写题干。题干必须保留原文完整文字，包括原文自带的题号前缀（如 "12."）；原文没有编号的题目绝对不要自行添加编号。
+2. 单选题 type:"single"，options 为 [{"key":"A","text":"选项原文"},...]：选项文字必须逐字来自原文，不得增删改写；answer 为正确选项字母如 "C"。
+3. 答案优先级：片段中明确给出的答案必须原样采用（判断题 √/×/对/错 映射为 "正确"/"错误"）；原文未给答案时，基于专业知识逐项分析后给出最可信答案，禁止留空、禁止输出"无法确定"。
+4. 判断题 type:"judge"，answer 只能是 "正确" 或 "错误"。填空题 type:"blank"，answer 依原文填空内容；简答题/问答/论述 type:"short"，answer 为参考答案要点。
+5. 题干、选项、答案都必须来自片段原文。若片段本身没有题目（例如只有答案表、代码或说明文字），输出 {"questions":[]}。
+6. 片段开头或结尾可能被截断：无法辨认完整题干的残缺题跳过，其余必须输出。
+7. 输出前自查：题目数量与片段中实际题目数一致、编号连续无跳漏、每题都含 type/stem/answer 字段。
+8. 只输出 JSON：{"questions":[...]}，不要任何解释文字，不要 Markdown 代码围栏。`
+
+// AI 补答案：原文未提供答案的客观题（单选/判断）由 AI 认真作答补全
+const ANSWER_FILL_SYSTEM = `你是考试答题引擎。为给定的客观题给出正确答案，要求：
+1. 单选题：仔细阅读题干，逐项分析每个选项后选出唯一正确项，answer 输出选项字母（如 "C"）。
+2. 判断题：根据专业知识判断正误，answer 只能输出 "正确" 或 "错误"。
+3. 不确定时选择最符合专业共识的答案，不要输出"无法确定"。
+4. 只输出 JSON：{"answers":[{"id":0,"answer":"C"},...]}，不要解释文字。`
 
 export interface RunPipelineOptions {
   file: File
@@ -200,7 +208,7 @@ async function runPipelineInner(
         const expected = meta.expected
         if (expected >= 6) {
           // 大片段：题目数量应接近期望值，明显偏少则纠错重试，仍不足判失败进补跑
-          const isShort = () => qs.length < Math.ceil(expected * 0.5)
+          const isShort = () => qs.length < Math.ceil(expected * 0.7)
           if (isShort()) {
             try {
               const raw2 = await chatSafe(
@@ -385,6 +393,75 @@ async function runPipelineInner(
       }
     } catch {
       /* 答案回填失败不影响主流程 */
+    }
+
+    // AI 补答案：客观题（单选/判断）仍缺答案时分批让 AI 认真作答补全
+    // （原文没给答案的题库很常见；逐题分析选项后给出最可信答案，比留空好）
+    try {
+      const noAnswer = all.filter(
+        (q) => (q.type === 'single' || q.type === 'judge') && !q.answer.trim()
+      )
+      if (noAnswer.length > 0) {
+        onEvent({
+          type: 'stage',
+          stage: 'answer-fill',
+          message: `正在为 ${noAnswer.length} 道缺答案的客观题补全答案…`,
+        })
+        const FILL_BATCH = 6
+        let filled = 0
+        for (let i = 0; i < noAnswer.length; i += FILL_BATCH) {
+          throwIfAborted(signal)
+          const group = noAnswer.slice(i, i + FILL_BATCH)
+          const payload = group.map((q, gi) => ({
+            id: gi,
+            type: q.type,
+            stem: q.stem,
+            options: q.options,
+          }))
+          try {
+            const raw = await chatSafe(
+              [
+                { role: 'system', content: ANSWER_FILL_SYSTEM },
+                { role: 'user', content: JSON.stringify({ questions: payload }) },
+              ],
+              { guard, ...llm }
+            )
+            const parsed = extractJson<{ answers?: Array<{ id?: number; answer?: string }> }>(raw)
+            const list = Array.isArray(parsed?.answers) ? parsed!.answers : []
+            for (const a of list) {
+              const q = group[Number(a?.id)]
+              if (!q) continue
+              if (q.type === 'judge') {
+                const ans = normalizeJudgeAnswer(String(a?.answer ?? ''))
+                if (ans === '正确' || ans === '错误') {
+                  q.answer = ans
+                  filled++
+                }
+              } else {
+                const ans = String(a?.answer ?? '')
+                  .trim()
+                  .toUpperCase()
+                  .replace(/[^A-H]/g, '')
+                  .slice(0, 1)
+                if (ans && q.options.some((o) => o.key === ans)) {
+                  q.answer = ans
+                  filled++
+                }
+              }
+            }
+          } catch {
+            /* 单批失败继续下一批 */
+          }
+        }
+        if (filled > 0) {
+          onEvent({
+            type: 'warning',
+            message: `已用 AI 为 ${filled} 道题补全答案（原文未提供答案，建议复核）`,
+          })
+        }
+      }
+    } catch {
+      /* 补答案失败不影响主流程 */
     }
 
     // 终局：去重/补扫/答案回填后的最终数据

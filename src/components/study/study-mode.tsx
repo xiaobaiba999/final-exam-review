@@ -28,6 +28,7 @@ import {
 } from 'lucide-react'
 import { StoredQuestion } from '@/lib/api-client'
 import { useQuestionStore } from '@/lib/question-store'
+import { ExplanationWithAsk } from '@/components/study/ask-ai'
 import { QuestionType, TYPE_LABELS } from '@/lib/types'
 import { userScopedKey } from '@/lib/user-store'
 
@@ -746,12 +747,6 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
                   <span className="ml-2 font-normal text-foreground">正确答案：{current.answer}</span>
                 )}
               </p>
-              {current.explanation && (
-                <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
-                  <span className="font-medium text-foreground">解析：</span>
-                  {current.explanation}
-                </p>
-              )}
             </div>
           ) : (
             <div className="rounded-lg border p-3 text-sm">
@@ -764,12 +759,6 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
               {(current.type === 'single' || current.type === 'judge') && current.answer && (
                 <p className="mt-1 text-muted-foreground">
                   参考答案：<span className="font-medium text-foreground">{current.answer}</span>
-                </p>
-              )}
-              {current.explanation && (
-                <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
-                  <span className="font-medium text-foreground">解析：</span>
-                  {current.explanation}
                 </p>
               )}
               <div className="mt-2 flex gap-2">
@@ -796,19 +785,18 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
           )
         )}
 
-        {/* 背题模式：答案+解析直接展示 */}
+        {/* 背题模式：答案直接展示（解析与追问见下方面板） */}
         {revealed && mode === 'recite' && (
           <div className="rounded-lg border border-emerald-500/40 bg-emerald-50/60 p-3 text-sm dark:bg-emerald-950/30">
             <p className="font-medium text-emerald-700 dark:text-emerald-400">
               答案：{current.answer || '（原文无答案，对照解析理解）'}
             </p>
-            {current.explanation && (
-              <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
-                <span className="font-medium text-foreground">解析：</span>
-                {current.explanation}
-              </p>
-            )}
           </div>
+        )}
+
+        {/* 解析 + AI 追问：流式生成详细解析，下方可继续向 AI 提问 */}
+        {revealed && liveCurrent && (
+          <ExplanationWithAsk key={liveCurrent.id} question={liveCurrent} />
         )}
       </div>
 

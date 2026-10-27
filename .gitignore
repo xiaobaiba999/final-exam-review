@@ -73,3 +73,4 @@ tests/database-runtime-build.sh
 tests/python-runtime-build.sh
 tests/python-runtime-container.sh
 tests/debug-doc.ts
+tool-results/
