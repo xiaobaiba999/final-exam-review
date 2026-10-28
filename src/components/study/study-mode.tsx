@@ -47,6 +47,15 @@ interface SavedSession {
   correct: number
   answered: number
   ts: number
+  /** 本轮各题作答记录（防呆：回看时恢复状态、禁止重复判分）；旧存档无此字段视为未记录 */
+  answers?: Record<string, SessionAnswer>
+}
+
+/** 会话内单题作答记录 */
+interface SessionAnswer {
+  ok: boolean
+  /** 所选项（判断题为「正确/错误」；填空/简答/自评为空串） */
+  picked: string
 }
 
 // 会话存档键（按用户隔离）
@@ -59,7 +68,14 @@ function shuffleList<T>(list: T[]) {
   }
 }
 
-export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
+export function StudyMode({
+  onGoImport,
+  onOpenBank,
+}: {
+  onGoImport: () => void
+  /** 点击统计卡跨 Tab 跳转题库并预置范围筛选 */
+  onOpenBank: (scope: 'all' | 'wrong' | 'starred') => void
+}) {
   const { toast } = useToast()
   const questions = useQuestionStore((s) => s.questions)
   const loading = useQuestionStore((s) => s.loading)
@@ -83,6 +99,7 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
   const [revealed, setRevealed] = useState(false)
   const [lastCorrect, setLastCorrect] = useState<boolean | null>(null)
   const [roundWrongIds, setRoundWrongIds] = useState<string[]>([])
+  const [answers, setAnswers] = useState<Record<string, SessionAnswer>>({})
   const [saved, setSaved] = useState<SavedSession | null>(null)
   const [starBusy, setStarBusy] = useState(false)
 
@@ -152,7 +169,7 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
   }, [])
 
   const writeSaved = useCallback(
-    (ids: string[], i: number, c: number, a: number, m: Mode) => {
+    (ids: string[], i: number, c: number, a: number, m: Mode, ans: Record<string, SessionAnswer>) => {
       const s: SavedSession = {
         v: 1,
         mode: m,
@@ -164,6 +181,7 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
         correct: c,
         answered: a,
         ts: Date.now(),
+        answers: ans,
       }
       try {
         localStorage.setItem(sessionKey(), JSON.stringify(s))
@@ -188,6 +206,7 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
       setRevealed(m === 'recite')
       setLastCorrect(null)
       setRoundWrongIds([])
+      setAnswers({})
       setMode(m)
       setPhase('session')
       writeSaved(
@@ -195,7 +214,8 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
         0,
         0,
         0,
-        m
+        m,
+        {}
       )
     },
     [order, writeSaved]
@@ -212,18 +232,31 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
       return
     }
     setQueue(qs)
-    setIdx(Math.min(saved.idx, qs.length - 1))
+    const si = Math.min(saved.idx, qs.length - 1)
+    // 防呆：恢复到已答过的题时直接进入只读回看态（不可重作、不重复计分）
+    const savedAnswers = saved.answers ?? {}
+    const sa = savedAnswers[qs[si].id]
+    setIdx(si)
     setCorrect(saved.correct)
     setAnswered(saved.answered)
-    setSelected('')
+    setSelected(sa?.picked ?? '')
     setInput('')
-    setRevealed(saved.mode === 'recite')
-    setLastCorrect(null)
+    if (saved.mode === 'recite') {
+      setRevealed(true)
+      setLastCorrect(null)
+    } else if (sa) {
+      setRevealed(true)
+      setLastCorrect(sa.ok)
+    } else {
+      setRevealed(false)
+      setLastCorrect(null)
+    }
     setRoundWrongIds([])
     setMode(saved.mode)
     setTypeFilter(saved.typeFilter)
     setScope(saved.scope)
     setOrder(saved.order)
+    setAnswers(savedAnswers)
     setPhase('session')
   }, [saved, liveMap, clearSaved, toast])
 
@@ -233,13 +266,17 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
 
   // ---------- 作答 ----------
   const recordResult = useCallback(
-    (ok: boolean) => {
+    (ok: boolean, picked?: string) => {
       if (!current) return
       const a2 = answered + 1
       const c2 = correct + (ok ? 1 : 0)
       setAnswered(a2)
       if (ok) setCorrect(c2)
       if (!ok) setRoundWrongIds((w) => (w.includes(current.id) ? w : [...w, current.id]))
+      // 记录本题作答（防呆：回看时据此恢复状态，禁止重复判分）；
+      // picked 由调用方显式传入，避免 setState 批处理导致的旧闭包值
+      const ans2 = { ...answers, [current.id]: { ok, picked: picked ?? '' } }
+      setAnswers(ans2)
       // 错题本联动：答对自动出本、答错自动入本（乐观更新，失败静默提示）
       applyAction(current.id, ok ? 'markRight' : 'markWrong').catch(() => {
         toast({ title: '进度同步失败', description: '错题本状态可能未保存', variant: 'destructive' })
@@ -249,10 +286,11 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
         idx,
         c2,
         a2,
-        mode
+        mode,
+        ans2
       )
     },
-    [current, answered, correct, applyAction, toast, writeSaved, queue, idx, mode]
+    [current, answered, correct, answers, applyAction, toast, writeSaved, queue, idx, mode]
   )
 
   const submitChoice = useCallback(
@@ -271,7 +309,7 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
       const ok = key === current.answer
       setLastCorrect(ok)
       setRevealed(true)
-      recordResult(ok)
+      recordResult(ok, key)
     },
     [current, revealed, lastCorrect, mode, recordResult]
   )
@@ -280,9 +318,42 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
     (ok: boolean) => {
       if (lastCorrect !== null) return
       setLastCorrect(ok)
-      recordResult(ok)
+      recordResult(ok, selected)
     },
-    [lastCorrect, recordResult]
+    [lastCorrect, recordResult, selected]
+  )
+
+  // 防呆跳题：前后移动均恢复该题历史作答状态 —— 已答题只读回看（不可重作、不重复计分），
+  // 未答题保持全新状态；回看时解析与 AI 追问面板照常可用
+  const gotoQuestion = useCallback(
+    (i: number) => {
+      const tq = queue[i]
+      if (!tq) return
+      const sa = answers[tq.id]
+      setIdx(i)
+      setSelected(sa?.picked ?? '')
+      setInput('')
+      if (mode === 'recite') {
+        setRevealed(true)
+        setLastCorrect(null)
+      } else if (sa) {
+        // 已答过：恢复作答结果，只读回看
+        setRevealed(true)
+        setLastCorrect(sa.ok)
+      } else {
+        setRevealed(false)
+        setLastCorrect(null)
+      }
+      writeSaved(
+        queue.map((q) => q.id),
+        i,
+        correct,
+        answered,
+        mode,
+        answers
+      )
+    },
+    [queue, answers, mode, correct, answered, writeSaved]
   )
 
   const next = useCallback(() => {
@@ -292,36 +363,13 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
       setPhase('result')
       return
     }
-    setIdx(ni)
-    setSelected('')
-    setInput('')
-    setRevealed(mode === 'recite')
-    setLastCorrect(null)
-    writeSaved(
-      queue.map((q) => q.id),
-      ni,
-      correct,
-      answered,
-      mode
-    )
-  }, [idx, queue, mode, correct, answered, clearSaved, writeSaved])
+    gotoQuestion(ni)
+  }, [idx, queue.length, clearSaved, gotoQuestion])
 
   const prev = useCallback(() => {
-    if (idx === 0) return
-    const pi = idx - 1
-    setIdx(pi)
-    setSelected('')
-    setInput('')
-    setRevealed(true)
-    setLastCorrect(null)
-    writeSaved(
-      queue.map((q) => q.id),
-      pi,
-      correct,
-      answered,
-      mode
-    )
-  }, [idx, queue, mode, correct, answered, writeSaved])
+    if (idx <= 0) return
+    gotoQuestion(idx - 1)
+  }, [idx, gotoQuestion])
 
   const toggleStar = useCallback(async () => {
     if (!liveCurrent || starBusy) return
@@ -365,28 +413,77 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
   if (phase === 'setup') {
     return (
       <div className="space-y-4">
-        {/* 统计总览 */}
+        {/* 统计总览（防呆交互：总题数/错题本/收藏可点击跳题库查看；空列表不跳转只提示，题库为空则引导去导入） */}
         <div className="grid grid-cols-4 gap-2">
-          {[
-            { label: '总题数', value: String(questions.length), cls: '' },
-            { label: '错题本', value: String(scopeCounts.wrong), cls: 'text-red-500' },
-            { label: '收藏', value: String(scopeCounts.starred), cls: 'text-amber-500' },
+          {([
+            {
+              label: '总题数',
+              value: String(questions.length),
+              cls: '',
+              onClick: () => {
+                if (questions.length === 0) {
+                  toast({ title: '题库还是空的，先去导入题库吧' })
+                  onGoImport()
+                  return
+                }
+                onOpenBank('all')
+              },
+            },
+            {
+              label: '错题本',
+              value: String(scopeCounts.wrong),
+              cls: 'text-red-500',
+              onClick: () => {
+                if (scopeCounts.wrong === 0) {
+                  toast({ title: '错题本还是空的，先去刷几题吧' })
+                  return
+                }
+                onOpenBank('wrong')
+              },
+            },
+            {
+              label: '收藏',
+              value: String(scopeCounts.starred),
+              cls: 'text-amber-500',
+              onClick: () => {
+                if (scopeCounts.starred === 0) {
+                  toast({ title: '还没有收藏题目，答题时点右上角星标即可收藏' })
+                  return
+                }
+                onOpenBank('starred')
+              },
+            },
             {
               label: '累计正确率',
               value: totalStats.acc === null ? '—' : `${totalStats.acc}%`,
               cls: 'text-emerald-600 dark:text-emerald-400',
+              onClick: null,
             },
-          ].map((t) => (
-            <div key={t.label} className="rounded-xl border bg-card px-2 py-3 text-center">
-              <p className={`text-lg font-bold leading-tight ${t.cls}`}>{t.value}</p>
-              <p className="mt-0.5 text-[11px] leading-none text-muted-foreground">{t.label}</p>
-            </div>
-          ))}
+          ] as Array<{ label: string; value: string; cls: string; onClick: (() => void) | null }>).map((t) =>
+            t.onClick ? (
+              <button
+                key={t.label}
+                onClick={t.onClick}
+                aria-label={`${t.label} ${t.value}，点击查看`}
+                className="rounded-xl border bg-card px-2 py-3 text-center transition-all hover:border-primary/50 hover:bg-accent active:scale-[0.97]"
+              >
+                <p className={`text-lg font-bold leading-tight ${t.cls}`}>{t.value}</p>
+                <p className="mt-0.5 text-[11px] leading-none text-muted-foreground">{t.label}</p>
+              </button>
+            ) : (
+              <div key={t.label} className="rounded-xl border bg-card px-2 py-3 text-center">
+                <p className={`text-lg font-bold leading-tight ${t.cls}`}>{t.value}</p>
+                <p className="mt-0.5 text-[11px] leading-none text-muted-foreground">{t.label}</p>
+              </div>
+            )
+          )}
         </div>
-        {totalStats.total > 0 && (
+        {totalStats.total > 0 ? (
           <p className="-mt-2 text-center text-[11px] text-muted-foreground">
-            已累计刷题 {totalStats.total} 次 · 答对 {totalStats.right} 次
+            已累计刷题 {totalStats.total} 次 · 答对 {totalStats.right} 次 · 点上方卡片可跳转查看
           </p>
+        ) : (
+          <p className="-mt-2 text-center text-[11px] text-muted-foreground">点击上方卡片可跳转查看对应题目</p>
         )}
 
         {/* 继续上次 */}
@@ -800,9 +897,9 @@ export function StudyMode({ onGoImport }: { onGoImport: () => void }) {
         )}
       </div>
 
-      {/* 操作区 */}
+      {/* 操作区：上一题（两种模式都可回看+追问）/ 下一题 */}
       <div className="flex gap-2">
-        {mode === 'recite' && idx > 0 && (
+        {idx > 0 && (
           <Button variant="outline" onClick={prev} className="min-h-12 flex-1">
             <ArrowLeft className="mr-1 h-4 w-4" aria-hidden />
             上一题

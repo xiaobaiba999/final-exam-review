@@ -12,6 +12,7 @@ import { SettingsDialog } from '@/components/study/settings-dialog'
 import { LoginGate } from '@/components/study/login-gate'
 import { useQuestionStore } from '@/lib/question-store'
 import { useSettingsStore, resolveAi } from '@/lib/settings-store'
+import { useUiStore } from '@/lib/ui-store'
 import { useUserStore } from '@/lib/user-store'
 
 type Tab = 'import' | 'bank' | 'study'
@@ -61,14 +62,23 @@ export default function Home() {
           {tab === 'import' && (
             <ImportWizard
               onImported={() => {
-                // 导入成功：强制刷新共享题库，并自动跳转题库让结果立即可见
+                // 导入成功：强制刷新共享题库，重置范围筛选并自动跳转题库让结果立即可见
                 void useQuestionStore.getState().load(true)
+                useUiStore.getState().setBankScope('all')
                 setTab('bank')
               }}
             />
           )}
           {tab === 'bank' && <QuestionBank onGoImport={() => setTab('import')} />}
-          {tab === 'study' && <StudyMode onGoImport={() => setTab('import')} />}
+          {tab === 'study' && (
+            <StudyMode
+              onGoImport={() => setTab('import')}
+              onOpenBank={(scope) => {
+                useUiStore.getState().setBankScope(scope)
+                setTab('bank')
+              }}
+            />
+          )}
         </div>
       </main>
 

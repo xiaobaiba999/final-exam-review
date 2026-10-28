@@ -31,6 +31,7 @@ import {
 } from 'lucide-react'
 import { deleteQuestion, clearQuestions, runExplain } from '@/lib/api-client'
 import { useQuestionStore } from '@/lib/question-store'
+import { useUiStore } from '@/lib/ui-store'
 import { ExplanationWithAsk } from '@/components/study/ask-ai'
 import { TYPE_LABELS, QuestionType } from '@/lib/types'
 
@@ -48,7 +49,9 @@ export function QuestionBank({ onGoImport }: { onGoImport: () => void }) {
   const resetLocal = useQuestionStore((s) => s.resetLocal)
 
   const [typeFilter, setTypeFilter] = useState<'all' | QuestionType>('all')
-  const [scope, setScope] = useState<Scope>('all')
+  // 范围筛选存共享 store：复习页统计卡可跨 Tab 跳转并预置筛选
+  const scope = useUiStore((s) => s.bankScope)
+  const setScope = useUiStore((s) => s.setBankScope)
   const [keyword, setKeyword] = useState('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [explaining, setExplaining] = useState(false)
